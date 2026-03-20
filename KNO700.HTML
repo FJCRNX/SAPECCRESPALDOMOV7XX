@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Reporte Stock Dinámico - KN Series</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f2f5; margin: 20px; color: #1a1f36; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); max-width: 1300px; margin: auto; }
+        .status-bar { padding: 12px; background: #eef2ff; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #4f46e5; font-weight: 500; }
+        .search-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 20px; align-items: end; }
+        .input-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 0.85rem; font-weight: bold; color: #4b5563; }
+        input { padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; outline: none; transition: 0.2s; font-size: 1rem; }
+        input:focus { border-color: #4f46e5; ring: 2px #4f46e5; }
+        .btn { padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; color: white; transition: 0.2s; display: flex; align-items: center; justify-content: center; }
+        .btn-blue { background: #4f46e5; }
+        .btn-blue:hover { background: #4338ca; }
+        .btn-green { background: #10b981; }
+        .btn-red { background: #ef4444; font-size: 0.75rem; margin-top: 5px; }
+        .table-container { height: 500px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 20px; background: #fff; }
+        table { width: 100%; border-collapse: collapse; }
+        th { position: sticky; top: 0; background: #1f2937; color: white; padding: 14px; font-size: 0.85rem; text-transform: uppercase; z-index: 10; }
+        td { padding: 12px; border-bottom: 1px solid #f3f4f6; font-size: 0.95rem; }
+        .pos { color: #059669; font-weight: bold; }
+        .neg { color: #dc2626; font-weight: bold; }
+        #resumen { display: flex; gap: 20px; background: #f9fafb; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 1.1rem; border: 1px solid #e5e7eb; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>📊 REPALDO KNO SAP ECC MOVIMIENTOS 701/702 31.01.2026</h2>
+    
+    <div class="status-bar" id="statusBar">Cargando base de datos local...</div>
+
+    <div class="search-grid">
+        <div class="input-group">
+            <label>Archivo CSV Inicial</label>
+            <input type="file" id="csvFile" accept=".csv">
+            <button class="btn btn-red" onclick="limpiarDB()">Borrar datos guardados</button>
+        </div>
+    </div>
+
+    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 20px 0;">
+
+    <div class="search-grid">
+        <div class="input-group">
+            <label>Centro (Sugerencias KN)</label>
+            <input type="text" id="busCentro" list="centrosList" placeholder="Ej: KN05">
+            <datalist id="centrosList">
+                </datalist>
+        </div>
+        <div class="input-group">
+            <label>Material / Código</label>
+            <input type="text" id="busMat" placeholder="Ej: MAT12345">
+        </div>
+        <button class="btn btn-blue" onclick="buscar()">🔍 Buscar Registros</button>
+        <button class="btn btn-green" onclick="exportar()">💾 Exportar a Excel</button>
+    </div>
+
+    <div id="resumen">
+        <span>Encontrados: <strong id="countVal">0</strong></span>
+        <span>Sumatoria Total: <strong id="sumVal">0.00</strong></span>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Centro</th>
+                    <th>Material</th>
+                    <th>Ctd. UM Entrada</th>
+                    <th>Clase Mov.</th>
+                    <th>Fecha Contabilización</th>
+                </tr>
+            </thead>
+            <tbody id="resBody"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    // 1. Inicializar Base de Datos
+    const db = new Dexie("SapKnData");
+    db.version(1).stores({ movimientos: "++id, centro, material" });
+
+    // 2. Generar Sugerencias de Centros KN00 a KN22
+    const datalist = document.getElementById('centrosList');
+    for (let i = 0; i <= 22; i++) {
+        const option = document.createElement('option');
+        const centroCode = `KN${i.toString().padStart(2, '0')}`;
+        option.value = centroCode;
+        datalist.appendChild(option);
+    }
+
+    const statusBar = document.getElementById('statusBar');
+
+    async function checkCount() {
+        const count = await db.movimientos.count();
+        statusBar.innerHTML = count > 0 
+            ? `🟢 Base de datos cargada: <strong>${count.toLocaleString()} registros</strong> disponibles.`
+            : `🟡 No hay datos cargados. Por favor selecciona tu archivo CSV.`;
+    }
+    checkCount();
+
+    // 3. Carga de CSV Masivo
+    document.getElementById('csvFile').onchange = (e) => {
+        const file = e.target.files[0];
+        if(!file) return;
+        statusBar.innerText = "⏳ Procesando archivo de gran tamaño... espera un momento.";
+        
+        Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
+            chunk: async (results) => {
+                const batch = results.data.map(r => {
+                    const keys = Object.keys(r);
+                    const find = (names) => r[keys.find(k => names.some(n => k.toLowerCase().trim().includes(n)))] || "";
+                    
+                    return {
+                        centro: String(find(['centro'])).trim().toUpperCase(),
+                        material: String(find(['material', 'código', 'codigo'])).trim().toUpperCase(),
+                        cantidad: parseFloat(String(find(['ctd', 'cantidad', 'um'])).replace(',', '.')) || 0,
+                        clase: find(['clase', 'movimiento']),
+                        fecha: find(['fe.', 'fecha', 'contabilización'])
+                    };
+                });
+                await db.movimientos.bulkAdd(batch);
+            },
+            complete: () => {
+                checkCount();
+                alert("¡Datos guardados localmente con éxito!");
+            }
+        });
+    };
+
+    // 4. Búsqueda con Auto-Mayúsculas
+    async function buscar() {
+        const cInput = document.getElementById('busCentro');
+        const mInput = document.getElementById('busMat');
+        
+        // Convertir a mayúsculas automáticamente
+        const centroValue = cInput.value.trim().toUpperCase();
+        const materialValue = mInput.value.trim().toUpperCase();
+        
+        // Actualizar los inputs visualmente para el usuario
+        cInput.value = centroValue;
+        mInput.value = materialValue;
+
+        if (!centroValue && !materialValue) {
+            alert("Introduce al menos un criterio de búsqueda.");
+            return;
+        }
+
+        statusBar.innerText = "🔍 Buscando...";
+        
+        let res = [];
+        if (centroValue && materialValue) {
+            res = await db.movimientos.where({centro: centroValue, material: materialValue}).toArray();
+        } else if (centroValue) {
+            res = await db.movimientos.where("centro").equals(centroValue).toArray();
+        } else {
+            res = await db.movimientos.where("material").equals(materialValue).toArray();
+        }
+
+        // Ordenar Fecha de menor a mayor (Asume formato DD.MM.YYYY)
+        res.sort((a, b) => {
+            const parseDate = (s) => {
+                const p = s.split('.');
+                return p.length === 3 ? new Date(p[2], p[1]-1, p[0]) : new Date(0);
+            };
+            return parseDate(a.fecha) - parseDate(b.fecha);
+        });
+
+        renderTable(res);
+    }
+
+    function renderTable(data) {
+        const body = document.getElementById('resBody');
+        const countVal = document.getElementById('countVal');
+        const sumVal = document.getElementById('sumVal');
+        
+        let total = 0;
+        let html = '';
+        
+        data.forEach(row => {
+            total += row.cantidad;
+            html += `<tr>
+                <td>${row.centro}</td>
+                <td>${row.material}</td>
+                <td class="${row.cantidad >= 0 ? 'pos' : 'neg'}">${row.cantidad.toLocaleString(undefined, {minimumFractionDigits: 3})}</td>
+                <td>${row.clase}</td>
+                <td>${row.fecha}</td>
+            </tr>`;
+        });
+
+        body.innerHTML = html || '<tr><td colspan="5" style="text-align:center">No se encontraron coincidencias exactas.</td></tr>';
+        countVal.innerText = data.length.toLocaleString();
+        sumVal.innerText = total.toLocaleString(undefined, {minimumFractionDigits: 3});
+        sumVal.parentElement.className = total >= 0 ? 'pos' : 'neg';
+        statusBar.innerText = "✅ Consulta finalizada.";
+        window.currentData = data;
+    }
+
+    function limpiarDB() {
+        if (confirm("¿Seguro que quieres borrar toda la base de datos local?")) {
+            db.movimientos.clear();
+            location.reload();
+        }
+    }
+
+    function exportar() {
+        if (!window.currentData || window.currentData.length === 0) return alert("No hay datos para exportar.");
+        const ws = XLSX.utils.json_to_sheet(window.currentData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Resultado KN");
+        XLSX.writeFile(wb, "Reporte_Materiales_KN.xlsx");
+    }
+</script>
+</body>
+</html>
